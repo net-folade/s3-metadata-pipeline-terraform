@@ -1,5 +1,29 @@
-build/
+# macOS
+.DS_Store
+
+# Terraform working directories and state — state is local for now and must never be committed
 .terraform/
 *.tfstate
 *.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+
+# Provider lock files. These normally belong in git, but one generated on macOS records
+# checksums for darwin_arm64 only and fails every Linux CI run. Commit them once they carry
+# both platforms: terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
+.terraform.lock.hcl
+
+# Variable files can carry secrets; the per-environment ones are deliberate exceptions
+*.tfvars
+*.auto.tfvars
+!envs/dev/terraform.tfvars
+!envs/prod/terraform.tfvars
+
+# Lambda build artefacts, rebuilt from source on every apply
 build/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
