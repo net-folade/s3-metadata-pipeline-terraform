@@ -1,0 +1,156 @@
+name: terraform
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.15.8"
+
+jobs:
+  # Formatting is checked once for the whole repo; it needs no providers and no state.
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - run: terraform fmt -check -recursive
+
+  # Each environment root is validated independently, because each has its own provider
+  # requirements and its own module wiring to type-check.
+  validate:
+    name: validate (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # -backend=false skips backend initialisation entirely, so no state and no
+      # credentials are needed to type-check the configuration.
+      - run: terraform init -backend=false
+        working-directory: envs/${{ matrix.environment }}
+
+      - run: terraform validate
+        working-directory: envs/${{ matrix.environment }}
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - run: tflint --init
+
+      # --recursive lints every module and environment root, not just the repo root.
+      - run: tflint --recursive --format compact
+
+# ---------------------------------------------------------------------------------------
+# The jobs below are written out in full but intentionally inactive. They unlock once two
+# things exist: a remote state backend (uncomment the backend block in envs/*/providers.tf)
+# and an IAM role in the target account that trusts GitHub's OIDC provider. Neither can
+# work against local state — a runner starts with an empty working directory, so a plan
+# against local state would compare live infrastructure to nothing and propose recreating
+# the whole stack. Authentication is OIDC only; no long-lived access keys are used here or
+# stored as secrets.
+# ---------------------------------------------------------------------------------------
+#
+#  plan:
+#    name: plan (${{ matrix.environment }})
+#    if: github.event_name == 'pull_request'
+#    runs-on: ubuntu-latest
+#    needs: [fmt, validate, tflint]
+#    permissions:
+#      contents: read
+#      id-token: write        # required for OIDC role assumption
+#      pull-requests: write   # required to post the plan as a comment
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        environment: [dev, prod]
+#    steps:
+#      - uses: actions/checkout@v4
+#
+#      - uses: aws-actions/configure-aws-credentials@v4
+#        with:
+#          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}   # read-only role, no secrets
+#          aws-region: us-east-1
+#
+#      - uses: hashicorp/setup-terraform@v3
+#        with:
+#          terraform_version: ${{ env.TF_VERSION }}
+#          terraform_wrapper: false
+#
+#      - run: terraform init
+#        working-directory: envs/${{ matrix.environment }}
+#
+#      - id: plan
+#        run: terraform plan -no-color -input=false -out=tfplan | tee plan.txt
+#        working-directory: envs/${{ matrix.environment }}
+#
+#      - uses: actions/github-script@v7
+#        with:
+#          script: |
+#            const fs = require('fs')
+#            const plan = fs.readFileSync('envs/${{ matrix.environment }}/plan.txt', 'utf8')
+#            const body = `### terraform plan — \`${{ matrix.environment }}\`\n\n<details><summary>show plan</summary>\n\n\`\`\`terraform\n${plan}\n\`\`\`\n\n</details>`
+#            await github.rest.issues.createComment({
+#              issue_number: context.issue.number,
+#              owner: context.repo.owner,
+#              repo: context.repo.repo,
+#              body,
+#            })
+#
+#  apply:
+#    name: apply (${{ matrix.environment }})
+#    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#    runs-on: ubuntu-latest
+#    needs: [fmt, validate, tflint]
+#    permissions:
+#      contents: read
+#      id-token: write
+#    strategy:
+#      max-parallel: 1        # dev applies and must pass before prod is touched
+#      matrix:
+#        environment: [dev, prod]
+#    environment: ${{ matrix.environment }}   # gate prod behind a required reviewer
+#    steps:
+#      - uses: actions/checkout@v4
+#
+#      - uses: aws-actions/configure-aws-credentials@v4
+#        with:
+#          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+#          aws-region: us-east-1
+#
+#      - uses: hashicorp/setup-terraform@v3
+#        with:
+#          terraform_version: ${{ env.TF_VERSION }}
+#          terraform_wrapper: false
+#
+#      - run: terraform init
+#        working-directory: envs/${{ matrix.environment }}
+#
+#      - run: terraform apply -auto-approve -input=false
+#        working-directory: envs/${{ matrix.environment }}
